@@ -1,19 +1,42 @@
 import os
-import sqlite3
+import re
+import urllib.parse
+import psycopg2
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-import re
 
-# ========== DATABASE SETUP ==========
+# ========== DATABASE SETUP (PostgreSQL) ==========
+def get_db_connection():
+    """Get connection to PostgreSQL database"""
+    database_url = os.environ.get('DATABASE_URL')
+    if database_url:
+        result = urllib.parse.urlparse(database_url)
+        return psycopg2.connect(
+            database=result.path[1:],
+            user=result.username,
+            password=result.password,
+            host=result.hostname,
+            port=result.port
+        )
+    else:
+        # Fallback for local testing
+        return psycopg2.connect(
+            database="postgres",
+            user="postgres",
+            password="password",
+            host="localhost",
+            port="5432"
+        )
+
 def init_db():
-    conn = sqlite3.connect('links.db')
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (user_id INTEGER PRIMARY KEY, is_premium INTEGER DEFAULT 0)''')
+                 (user_id BIGINT PRIMARY KEY, is_premium INTEGER DEFAULT 0)''')
     c.execute('''CREATE TABLE IF NOT EXISTS links
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                  user_id INTEGER, 
+                 (id SERIAL PRIMARY KEY, 
+                  user_id BIGINT, 
                   url TEXT, 
                   title TEXT,
                   saved_date TEXT)''')
@@ -21,62 +44,61 @@ def init_db():
     conn.close()
 
 def add_user(user_id):
-    conn = sqlite3.connect('links.db')
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+    c.execute("INSERT INTO users (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING", (user_id,))
     conn.commit()
     conn.close()
 
 def is_premium_user(user_id):
-    conn = sqlite3.connect('links.db')
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT is_premium FROM users WHERE user_id = ?", (user_id,))
+    c.execute("SELECT is_premium FROM users WHERE user_id = %s", (user_id,))
     result = c.fetchone()
     conn.close()
     return result and result[0] == 1
 
 def get_link_count(user_id):
-    conn = sqlite3.connect('links.db')
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM links WHERE user_id = ?", (user_id,))
+    c.execute("SELECT COUNT(*) FROM links WHERE user_id = %s", (user_id,))
     count = c.fetchone()[0]
     conn.close()
     return count
 
 def save_link(user_id, url):
-    conn = sqlite3.connect('links.db')
+    conn = get_db_connection()
     c = conn.cursor()
-    # Try to get title from URL (simplified)
     title = url.replace('https://', '').replace('http://', '').split('/')[0]
     if len(title) > 50:
         title = title[:50] + '...'
-    c.execute("INSERT INTO links (user_id, url, title, saved_date) VALUES (?, ?, ?, ?)",
+    c.execute("INSERT INTO links (user_id, url, title, saved_date) VALUES (%s, %s, %s, %s)",
               (user_id, url, title, datetime.now().strftime("%Y-%m-%d %H:%M")))
     conn.commit()
     conn.close()
     return title
 
 def get_links(user_id):
-    conn = sqlite3.connect('links.db')
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT id, url, title, saved_date FROM links WHERE user_id = ? ORDER BY id DESC", (user_id,))
+    c.execute("SELECT id, url, title, saved_date FROM links WHERE user_id = %s ORDER BY id DESC", (user_id,))
     links = c.fetchall()
     conn.close()
     return links
 
 def delete_link(user_id, link_id):
-    conn = sqlite3.connect('links.db')
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("DELETE FROM links WHERE id = ? AND user_id = ?", (link_id, user_id))
+    c.execute("DELETE FROM links WHERE id = %s AND user_id = %s", (link_id, user_id))
     affected = c.rowcount
     conn.commit()
     conn.close()
     return affected > 0
 
 def search_links(user_id, query):
-    conn = sqlite3.connect('links.db')
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT id, url, title, saved_date FROM links WHERE user_id = ? AND (url LIKE ? OR title LIKE ?) ORDER BY id DESC",
+    c.execute("SELECT id, url, title, saved_date FROM links WHERE user_id = %s AND (url LIKE %s OR title LIKE %s) ORDER BY id DESC",
               (user_id, f'%{query}%', f'%{query}%'))
     links = c.fetchall()
     conn.close()
@@ -110,7 +132,6 @@ async def save_link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     add_user(user_id)
     
-    # Check if premium or under limit
     if not is_premium_user(user_id):
         count = get_link_count(user_id)
         if count >= 20:
@@ -123,7 +144,6 @@ async def save_link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
     
-    # Get URL from command
     text = update.message.text
     parts = text.split(maxsplit=1)
     if len(parts) < 2:
@@ -155,10 +175,8 @@ async def list_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 You haven't saved any links yet.\n\nUse /save [url] to get started!")
         return
     
-    # Show links with formatting
     text = f"📌 *Your Saved Links ({len(links)})*\n\n"
     for i, (link_id, url, title, date) in enumerate(links[:20], 1):
-        # Truncate long URLs
         display_url = url[:40] + '...' if len(url) > 40 else url
         text += f"{i}. [{title}]({url})\n   🕐 {date}\n   `/delete {link_id}`\n\n"
     
@@ -171,7 +189,6 @@ async def search_links_command(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = update.effective_user.id
     add_user(user_id)
     
-    # Search command: /search [term]
     text = update.message.text
     parts = text.split(maxsplit=1)
     if len(parts) < 2:
@@ -269,8 +286,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     
     if data == 'premium_pay':
-        # This is where Telegram Stars payment would go
-        # For now, we'll simulate it
         text = """⭐ *Payment Requested*
 
 Please send 50 Stars to @YourBotName.
@@ -292,11 +307,9 @@ async def verify_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     add_user(user_id)
     
-    # This would verify Stars payment
-    # For testing, we'll just upgrade
-    conn = sqlite3.connect('links.db')
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("UPDATE users SET is_premium = 1 WHERE user_id = ?", (user_id,))
+    c.execute("UPDATE users SET is_premium = 1 WHERE user_id = %s", (user_id,))
     conn.commit()
     conn.close()
     
@@ -306,17 +319,16 @@ async def verify_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     print("🤖 Starting Link Saver Bot...")
     
-    # Initialize database
     init_db()
     print("✅ Database ready")
     
-    # Your bot token from @BotFather
-    TOKEN = "7636921550:AAH3AKHgV-vDjH08A-VDtxIh3jq7KED328U"
+    TOKEN = os.environ.get("BOT_TOKEN")
+    if not TOKEN:
+        print("❌ BOT_TOKEN environment variable not set!")
+        return
     
-    # Create application
     application = Application.builder().token(TOKEN).build()
     
-    # Add command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("save", save_link_command))
     application.add_handler(CommandHandler("list", list_links))
@@ -327,7 +339,6 @@ def main():
     application.add_handler(CommandHandler("verify", verify_payment))
     application.add_handler(CallbackQueryHandler(button_callback))
     
-    # Run the bot
     print("✅ Bot is running! Press Ctrl+C to stop.")
     application.run_polling()
 
