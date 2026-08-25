@@ -1,42 +1,19 @@
 import os
+import sqlite3
 import re
-import urllib.parse
-import psycopg2
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
-# ========== DATABASE SETUP (PostgreSQL) ==========
-def get_db_connection():
-    """Get connection to PostgreSQL database"""
-    database_url = os.environ.get('DATABASE_URL')
-    if database_url:
-        result = urllib.parse.urlparse(database_url)
-        return psycopg2.connect(
-            database=result.path[1:],
-            user=result.username,
-            password=result.password,
-            host=result.hostname,
-            port=result.port
-        )
-    else:
-        # Fallback for local testing
-        return psycopg2.connect(
-            database="postgres",
-            user="postgres",
-            password="password",
-            host="localhost",
-            port="5432"
-        )
-
+# ========== DATABASE SETUP (SQLite) ==========
 def init_db():
-    conn = get_db_connection()
+    conn = sqlite3.connect('links.db')
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (user_id BIGINT PRIMARY KEY, is_premium INTEGER DEFAULT 0)''')
+                 (user_id INTEGER PRIMARY KEY, is_premium INTEGER DEFAULT 0)''')
     c.execute('''CREATE TABLE IF NOT EXISTS links
-                 (id SERIAL PRIMARY KEY, 
-                  user_id BIGINT, 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                  user_id INTEGER, 
                   url TEXT, 
                   title TEXT,
                   saved_date TEXT)''')
@@ -44,61 +21,61 @@ def init_db():
     conn.close()
 
 def add_user(user_id):
-    conn = get_db_connection()
+    conn = sqlite3.connect('links.db')
     c = conn.cursor()
-    c.execute("INSERT INTO users (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING", (user_id,))
+    c.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
     conn.commit()
     conn.close()
 
 def is_premium_user(user_id):
-    conn = get_db_connection()
+    conn = sqlite3.connect('links.db')
     c = conn.cursor()
-    c.execute("SELECT is_premium FROM users WHERE user_id = %s", (user_id,))
+    c.execute("SELECT is_premium FROM users WHERE user_id = ?", (user_id,))
     result = c.fetchone()
     conn.close()
     return result and result[0] == 1
 
 def get_link_count(user_id):
-    conn = get_db_connection()
+    conn = sqlite3.connect('links.db')
     c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM links WHERE user_id = %s", (user_id,))
+    c.execute("SELECT COUNT(*) FROM links WHERE user_id = ?", (user_id,))
     count = c.fetchone()[0]
     conn.close()
     return count
 
 def save_link(user_id, url):
-    conn = get_db_connection()
+    conn = sqlite3.connect('links.db')
     c = conn.cursor()
     title = url.replace('https://', '').replace('http://', '').split('/')[0]
     if len(title) > 50:
         title = title[:50] + '...'
-    c.execute("INSERT INTO links (user_id, url, title, saved_date) VALUES (%s, %s, %s, %s)",
+    c.execute("INSERT INTO links (user_id, url, title, saved_date) VALUES (?, ?, ?, ?)",
               (user_id, url, title, datetime.now().strftime("%Y-%m-%d %H:%M")))
     conn.commit()
     conn.close()
     return title
 
 def get_links(user_id):
-    conn = get_db_connection()
+    conn = sqlite3.connect('links.db')
     c = conn.cursor()
-    c.execute("SELECT id, url, title, saved_date FROM links WHERE user_id = %s ORDER BY id DESC", (user_id,))
+    c.execute("SELECT id, url, title, saved_date FROM links WHERE user_id = ? ORDER BY id DESC", (user_id,))
     links = c.fetchall()
     conn.close()
     return links
 
 def delete_link(user_id, link_id):
-    conn = get_db_connection()
+    conn = sqlite3.connect('links.db')
     c = conn.cursor()
-    c.execute("DELETE FROM links WHERE id = %s AND user_id = %s", (link_id, user_id))
+    c.execute("DELETE FROM links WHERE id = ? AND user_id = ?", (link_id, user_id))
     affected = c.rowcount
     conn.commit()
     conn.close()
     return affected > 0
 
 def search_links(user_id, query):
-    conn = get_db_connection()
+    conn = sqlite3.connect('links.db')
     c = conn.cursor()
-    c.execute("SELECT id, url, title, saved_date FROM links WHERE user_id = %s AND (url LIKE %s OR title LIKE %s) ORDER BY id DESC",
+    c.execute("SELECT id, url, title, saved_date FROM links WHERE user_id = ? AND (url LIKE ? OR title LIKE ?) ORDER BY id DESC",
               (user_id, f'%{query}%', f'%{query}%'))
     links = c.fetchall()
     conn.close()
@@ -307,9 +284,9 @@ async def verify_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     add_user(user_id)
     
-    conn = get_db_connection()
+    conn = sqlite3.connect('links.db')
     c = conn.cursor()
-    c.execute("UPDATE users SET is_premium = 1 WHERE user_id = %s", (user_id,))
+    c.execute("UPDATE users SET is_premium = 1 WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()
     
